@@ -4,6 +4,11 @@
 package client
 
 import (
+	"fmt"
+
+	"github.com/hashicorp/go-azure-sdk/resource-manager/web/2023-01-01/appserviceplans"
+	"github.com/hashicorp/go-azure-sdk/resource-manager/web/2023-01-01/resourceproviders"
+	"github.com/hashicorp/go-azure-sdk/resource-manager/web/2023-01-01/webapps"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/common"
 	"github.com/tombuildsstuff/kermit/sdk/web/2022-09-01/web"
 )
@@ -11,27 +16,41 @@ import (
 type Client struct {
 	AppServiceEnvironmentClient *web.AppServiceEnvironmentsClient
 	BaseClient                  *web.BaseClient
-	ServicePlanClient           *web.AppServicePlansClient
-	WebAppsClient               *web.AppsClient
+	ResourceProvidersClient     *resourceproviders.ResourceProvidersClient
+	ServicePlanClient           *appserviceplans.AppServicePlansClient
+	WebAppsClient               *webapps.WebAppsClient
 }
 
-func NewClient(o *common.ClientOptions) *Client {
+func NewClient(o *common.ClientOptions) (*Client, error) {
 	appServiceEnvironmentClient := web.NewAppServiceEnvironmentsClientWithBaseURI(o.ResourceManagerEndpoint, o.SubscriptionId)
 	o.ConfigureClient(&appServiceEnvironmentClient.Client, o.ResourceManagerAuthorizer)
 
 	baseClient := web.NewWithBaseURI(o.ResourceManagerEndpoint, o.SubscriptionId)
 	o.ConfigureClient(&baseClient.Client, o.ResourceManagerAuthorizer)
 
-	webAppServiceClient := web.NewAppsClientWithBaseURI(o.ResourceManagerEndpoint, o.SubscriptionId)
-	o.ConfigureClient(&webAppServiceClient.Client, o.ResourceManagerAuthorizer)
+	webAppServiceClient, err := webapps.NewWebAppsClientWithBaseURI(o.Environment.ResourceManager)
+	if err != nil {
+		return nil, fmt.Errorf("building WebApps client: %+v", err)
+	}
+	o.Configure(webAppServiceClient.Client, o.Authorizers.ResourceManager)
 
-	servicePlanClient := web.NewAppServicePlansClientWithBaseURI(o.ResourceManagerEndpoint, o.SubscriptionId)
-	o.ConfigureClient(&servicePlanClient.Client, o.ResourceManagerAuthorizer)
+	resourceProvidersClient, err := resourceproviders.NewResourceProvidersClientWithBaseURI(o.Environment.ResourceManager)
+	if err != nil {
+		return nil, fmt.Errorf("building ResourceProviders client: %+v", err)
+	}
+	o.Configure(resourceProvidersClient.Client, o.Authorizers.ResourceManager)
+
+	servicePlanClient, err := appserviceplans.NewAppServicePlansClientWithBaseURI(o.Environment.ResourceManager)
+	if err != nil {
+		return nil, fmt.Errorf("building ServicePlan client: %+v", err)
+	}
+	o.Configure(servicePlanClient.Client, o.Authorizers.ResourceManager)
 
 	return &Client{
 		AppServiceEnvironmentClient: &appServiceEnvironmentClient,
 		BaseClient:                  &baseClient,
-		ServicePlanClient:           &servicePlanClient,
-		WebAppsClient:               &webAppServiceClient,
-	}
+		ResourceProvidersClient:     resourceProvidersClient,
+		ServicePlanClient:           servicePlanClient,
+		WebAppsClient:               webAppServiceClient,
+	}, nil
 }

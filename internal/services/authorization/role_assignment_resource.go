@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2020-04-01-preview/authorization" // nolint: staticcheck
-	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2021-01-01/subscriptions"                     // nolint: staticcheck
 	"github.com/hashicorp/go-azure-helpers/lang/pointer"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
+	"github.com/hashicorp/go-azure-sdk/resource-manager/resources/2022-12-01/subscriptions"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/azure"
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/tf"
@@ -44,7 +44,6 @@ func resourceArmRoleAssignment() *pluginsdk.Resource {
 		Timeouts: &pluginsdk.ResourceTimeout{
 			Create: pluginsdk.DefaultTimeout(30 * time.Minute),
 			Read:   pluginsdk.DefaultTimeout(5 * time.Minute),
-			Update: pluginsdk.DefaultTimeout(30 * time.Minute),
 			Delete: pluginsdk.DefaultTimeout(30 * time.Minute),
 		},
 
@@ -102,7 +101,14 @@ func resourceArmRoleAssignment() *pluginsdk.Resource {
 
 			"principal_type": {
 				Type:     pluginsdk.TypeString,
+				Optional: true,
 				Computed: true,
+				ForceNew: true,
+				ValidateFunc: validation.StringInSlice([]string{
+					"User",
+					"Group",
+					"ServicePrincipal",
+				}, false),
 			},
 
 			"skip_service_principal_aad_check": {
@@ -150,7 +156,7 @@ func resourceArmRoleAssignment() *pluginsdk.Resource {
 func resourceArmRoleAssignmentCreate(d *pluginsdk.ResourceData, meta interface{}) error {
 	roleAssignmentsClient := meta.(*clients.Client).Authorization.RoleAssignmentsClient
 	roleDefinitionsClient := meta.(*clients.Client).Authorization.RoleDefinitionsClient
-	subscriptionClient := meta.(*clients.Client).Subscription.Client
+	subscriptionClient := meta.(*clients.Client).Subscription.SubscriptionsClient
 	subscriptionId := meta.(*clients.Client).Account.SubscriptionId
 	ctx, cancel := timeouts.ForCreate(meta.(*clients.Client).StopContext, d)
 	defer cancel()
@@ -233,6 +239,11 @@ func resourceArmRoleAssignmentCreate(d *pluginsdk.ResourceData, meta interface{}
 	skipPrincipalCheck := d.Get("skip_service_principal_aad_check").(bool)
 	if skipPrincipalCheck {
 		properties.RoleAssignmentProperties.PrincipalType = authorization.ServicePrincipal
+	}
+
+	principalType := d.Get("principal_type").(string)
+	if principalType != "" {
+		properties.RoleAssignmentProperties.PrincipalType = authorization.PrincipalType(principalType)
 	}
 
 	if err := pluginsdk.Retry(d.Timeout(pluginsdk.TimeoutCreate), retryRoleAssignmentsClient(d, scope, name, properties, meta, tenantId)); err != nil {
@@ -404,15 +415,21 @@ func roleAssignmentCreateStateRefreshFunc(ctx context.Context, client *authoriza
 	}
 }
 
-func getTenantIdBySubscriptionId(ctx context.Context, client *subscriptions.Client, subscriptionId string) (string, error) {
-	resp, err := client.Get(ctx, subscriptionId)
+func getTenantIdBySubscriptionId(ctx context.Context, client *subscriptions.SubscriptionsClient, subscriptionId string) (string, error) {
+	id := commonids.NewSubscriptionID(subscriptionId)
+	resp, err := client.Get(ctx, id)
 	if err != nil {
-		return "", fmt.Errorf("get tenant Id by Subscription %s: %+v", subscriptionId, err)
+		return "", fmt.Errorf("retrieving %s: %+v", id, err)
 	}
-	if resp.TenantID == nil {
-		return "", fmt.Errorf("tenant Id is nil by Subscription %s: %+v", subscriptionId, resp)
+	tenantId := ""
+	if model := resp.Model; model != nil && model.TenantId != nil {
+		tenantId = *model.TenantId
 	}
-	return *resp.TenantID, nil
+
+	if tenantId == "" {
+		return "", fmt.Errorf("retrieving %s: `tenantId` was nil", id)
+	}
+	return tenantId, nil
 }
 
 func normalizeScopeValue(scope string) (result string) {
