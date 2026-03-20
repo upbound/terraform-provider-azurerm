@@ -6,8 +6,11 @@ package managedidentity
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/Azure/go-autorest/autorest"
+	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/hashicorp/go-azure-helpers/lang/response"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonschema"
@@ -15,9 +18,12 @@ import (
 	"github.com/hashicorp/terraform-provider-azurerm/internal/locks"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/sdk"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/pluginsdk"
+	"github.com/hashicorp/terraform-provider-azurerm/internal/tf/validation"
 )
 
 var _ sdk.Resource = FederatedIdentityCredentialResource{}
+
+const federatedIdentityCredentialPreviewAPIVersion = "2025-01-31-preview"
 
 type FederatedIdentityCredentialResource struct{}
 
@@ -26,12 +32,14 @@ func (r FederatedIdentityCredentialResource) ModelObject() interface{} {
 }
 
 type FederatedIdentityCredentialResourceSchema struct {
-	Audience          []string `tfschema:"audience"`
-	Issuer            string   `tfschema:"issuer"`
-	Name              string   `tfschema:"name"`
-	ResourceGroupName string   `tfschema:"resource_group_name"`
-	ResourceName      string   `tfschema:"parent_id"`
-	Subject           string   `tfschema:"subject"`
+	Audience                        []string `tfschema:"audience"`
+	ClaimsMatchingExpressionValue   string   `tfschema:"claims_matching_expression_value"`
+	ClaimsMatchingExpressionVersion int      `tfschema:"claims_matching_expression_version"`
+	Issuer                          string   `tfschema:"issuer"`
+	Name                            string   `tfschema:"name"`
+	ResourceGroupName               string   `tfschema:"resource_group_name"`
+	ResourceName                    string   `tfschema:"parent_id"`
+	Subject                         string   `tfschema:"subject"`
 }
 
 func (r FederatedIdentityCredentialResource) IDValidationFunc() pluginsdk.SchemaValidateFunc {
@@ -71,8 +79,43 @@ func (r FederatedIdentityCredentialResource) Arguments() map[string]*pluginsdk.S
 		},
 		"subject": {
 			ForceNew: true,
-			Required: true,
+			Optional: true,
 			Type:     pluginsdk.TypeString,
+			ExactlyOneOf: []string{
+				"subject",
+				"claims_matching_expression_value",
+			},
+			ConflictsWith: []string{
+				"claims_matching_expression_value",
+				"claims_matching_expression_version",
+			},
+		},
+		"claims_matching_expression_value": {
+			ForceNew: true,
+			Optional: true,
+			Type:     pluginsdk.TypeString,
+			ExactlyOneOf: []string{
+				"subject",
+				"claims_matching_expression_value",
+			},
+			RequiredWith: []string{
+				"claims_matching_expression_version",
+			},
+			ConflictsWith: []string{
+				"subject",
+			},
+		},
+		"claims_matching_expression_version": {
+			ForceNew:     true,
+			Optional:     true,
+			Type:         pluginsdk.TypeInt,
+			ValidateFunc: validation.IntAtLeast(1),
+			RequiredWith: []string{
+				"claims_matching_expression_value",
+			},
+			ConflictsWith: []string{
+				"subject",
+			},
 		},
 	}
 }
@@ -84,6 +127,10 @@ func (r FederatedIdentityCredentialResource) Create() sdk.ResourceFunc {
 		Timeout: 30 * time.Minute,
 		Func: func(ctx context.Context, metadata sdk.ResourceMetaData) error {
 			client := metadata.Client.ManagedIdentity.V20230131.ManagedIdentities
+			baseUri, err := r.resourceManagerBaseURI(metadata)
+			if err != nil {
+				return err
+			}
 
 			var config FederatedIdentityCredentialResourceSchema
 			if err := metadata.Decode(&config); err != nil {
@@ -101,7 +148,7 @@ func (r FederatedIdentityCredentialResource) Create() sdk.ResourceFunc {
 
 			id := managedidentities.NewFederatedIdentityCredentialID(subscriptionId, config.ResourceGroupName, parentId.UserAssignedIdentityName, config.Name)
 
-			existing, err := client.FederatedIdentityCredentialsGet(ctx, id)
+			existing, err := r.getFederatedIdentityCredential(ctx, client, baseUri, id)
 			if err != nil {
 				if !response.WasNotFound(existing.HttpResponse) {
 					return fmt.Errorf("checking for the presence of an existing %s: %+v", id, err)
@@ -111,10 +158,8 @@ func (r FederatedIdentityCredentialResource) Create() sdk.ResourceFunc {
 				return metadata.ResourceRequiresImport(r.ResourceType(), id)
 			}
 
-			var payload managedidentities.FederatedIdentityCredential
-			r.mapFederatedIdentityCredentialResourceSchemaToFederatedIdentityCredential(config, &payload)
-
-			if _, err := client.FederatedIdentityCredentialsCreateOrUpdate(ctx, id, payload); err != nil {
+			payload := r.mapFederatedIdentityCredentialResourceSchemaToPreviewPayload(config)
+			if _, err := r.createOrUpdateFederatedIdentityCredential(ctx, client, baseUri, id, payload); err != nil {
 				return fmt.Errorf("creating %s: %+v", id, err)
 			}
 
@@ -128,6 +173,10 @@ func (r FederatedIdentityCredentialResource) Read() sdk.ResourceFunc {
 		Timeout: 5 * time.Minute,
 		Func: func(ctx context.Context, metadata sdk.ResourceMetaData) error {
 			client := metadata.Client.ManagedIdentity.V20230131.ManagedIdentities
+			baseUri, err := r.resourceManagerBaseURI(metadata)
+			if err != nil {
+				return err
+			}
 			schema := FederatedIdentityCredentialResourceSchema{}
 
 			id, err := managedidentities.ParseFederatedIdentityCredentialID(metadata.ResourceData.Id())
@@ -135,7 +184,7 @@ func (r FederatedIdentityCredentialResource) Read() sdk.ResourceFunc {
 				return err
 			}
 
-			resp, err := client.FederatedIdentityCredentialsGet(ctx, *id)
+			resp, err := r.getFederatedIdentityCredential(ctx, client, baseUri, *id)
 			if err != nil {
 				if response.WasNotFound(resp.HttpResponse) {
 					return metadata.MarkAsGone(*id)
@@ -148,7 +197,7 @@ func (r FederatedIdentityCredentialResource) Read() sdk.ResourceFunc {
 				schema.ResourceGroupName = id.ResourceGroupName
 				parentId := commonids.NewUserAssignedIdentityID(id.SubscriptionId, id.ResourceGroupName, id.UserAssignedIdentityName)
 				schema.ResourceName = parentId.ID()
-				r.mapFederatedIdentityCredentialToFederatedIdentityCredentialResourceSchema(*model, &schema)
+				r.mapPreviewPayloadToFederatedIdentityCredentialResourceSchema(*model, &schema)
 			}
 
 			return metadata.Encode(&schema)
@@ -160,6 +209,10 @@ func (r FederatedIdentityCredentialResource) Delete() sdk.ResourceFunc {
 		Timeout: 30 * time.Minute,
 		Func: func(ctx context.Context, metadata sdk.ResourceMetaData) error {
 			client := metadata.Client.ManagedIdentity.V20230131.ManagedIdentities
+			baseUri, err := r.resourceManagerBaseURI(metadata)
+			if err != nil {
+				return err
+			}
 
 			var config FederatedIdentityCredentialResourceSchema
 			if err := metadata.Decode(&config); err != nil {
@@ -179,7 +232,7 @@ func (r FederatedIdentityCredentialResource) Delete() sdk.ResourceFunc {
 				return err
 			}
 
-			if _, err := client.FederatedIdentityCredentialsDelete(ctx, *id); err != nil {
+			if _, err := r.deleteFederatedIdentityCredential(ctx, client, baseUri, *id); err != nil {
 				return fmt.Errorf("deleting %s: %+v", *id, err)
 			}
 
@@ -188,28 +241,163 @@ func (r FederatedIdentityCredentialResource) Delete() sdk.ResourceFunc {
 	}
 }
 
-func (r FederatedIdentityCredentialResource) mapFederatedIdentityCredentialResourceSchemaToFederatedIdentityCredentialProperties(input FederatedIdentityCredentialResourceSchema, output *managedidentities.FederatedIdentityCredentialProperties) {
-	output.Audiences = input.Audience
-	output.Issuer = input.Issuer
-	output.Subject = input.Subject
+type FederatedIdentityCredentialClaimsMatchingExpression struct {
+	LanguageVersion int64  `json:"languageVersion"`
+	Value           string `json:"value"`
 }
 
-func (r FederatedIdentityCredentialResource) mapFederatedIdentityCredentialPropertiesToFederatedIdentityCredentialResourceSchema(input managedidentities.FederatedIdentityCredentialProperties, output *FederatedIdentityCredentialResourceSchema) {
-	output.Audience = input.Audiences
-	output.Issuer = input.Issuer
-	output.Subject = input.Subject
+type FederatedIdentityCredentialPreviewProperties struct {
+	Audiences                []string                                             `json:"audiences"`
+	ClaimsMatchingExpression *FederatedIdentityCredentialClaimsMatchingExpression `json:"claimsMatchingExpression,omitempty"`
+	Issuer                   string                                               `json:"issuer"`
+	Subject                  *string                                              `json:"subject,omitempty"`
 }
 
-func (r FederatedIdentityCredentialResource) mapFederatedIdentityCredentialResourceSchemaToFederatedIdentityCredential(input FederatedIdentityCredentialResourceSchema, output *managedidentities.FederatedIdentityCredential) {
-	if output.Properties == nil {
-		output.Properties = &managedidentities.FederatedIdentityCredentialProperties{}
+type FederatedIdentityCredentialPreviewPayload struct {
+	Properties *FederatedIdentityCredentialPreviewProperties `json:"properties,omitempty"`
+}
+
+func (r FederatedIdentityCredentialResource) mapFederatedIdentityCredentialResourceSchemaToPreviewPayload(input FederatedIdentityCredentialResourceSchema) FederatedIdentityCredentialPreviewPayload {
+	properties := &FederatedIdentityCredentialPreviewProperties{
+		Audiences: input.Audience,
+		Issuer:    input.Issuer,
 	}
-	r.mapFederatedIdentityCredentialResourceSchemaToFederatedIdentityCredentialProperties(input, output.Properties)
+	if input.Subject != "" {
+		subject := input.Subject
+		properties.Subject = &subject
+	}
+	if input.ClaimsMatchingExpressionValue != "" {
+		properties.ClaimsMatchingExpression = &FederatedIdentityCredentialClaimsMatchingExpression{
+			LanguageVersion: int64(input.ClaimsMatchingExpressionVersion),
+			Value:           input.ClaimsMatchingExpressionValue,
+		}
+	}
+	return FederatedIdentityCredentialPreviewPayload{Properties: properties}
 }
 
-func (r FederatedIdentityCredentialResource) mapFederatedIdentityCredentialToFederatedIdentityCredentialResourceSchema(input managedidentities.FederatedIdentityCredential, output *FederatedIdentityCredentialResourceSchema) {
+func (r FederatedIdentityCredentialResource) mapPreviewPayloadToFederatedIdentityCredentialResourceSchema(input FederatedIdentityCredentialPreviewPayload, output *FederatedIdentityCredentialResourceSchema) {
 	if input.Properties == nil {
-		input.Properties = &managedidentities.FederatedIdentityCredentialProperties{}
+		input.Properties = &FederatedIdentityCredentialPreviewProperties{}
 	}
-	r.mapFederatedIdentityCredentialPropertiesToFederatedIdentityCredentialResourceSchema(*input.Properties, output)
+	output.Audience = input.Properties.Audiences
+	output.Issuer = input.Properties.Issuer
+	if input.Properties.Subject != nil {
+		output.Subject = *input.Properties.Subject
+	}
+	if input.Properties.ClaimsMatchingExpression != nil {
+		output.ClaimsMatchingExpressionValue = input.Properties.ClaimsMatchingExpression.Value
+		output.ClaimsMatchingExpressionVersion = int(input.Properties.ClaimsMatchingExpression.LanguageVersion)
+	}
+}
+
+func (r FederatedIdentityCredentialResource) resourceManagerBaseURI(metadata sdk.ResourceMetaData) (string, error) {
+	endpoint, ok := metadata.Client.Account.Environment.ResourceManager.Endpoint()
+	if !ok {
+		return "", fmt.Errorf("resolving resource manager endpoint for preview federated identity credential API")
+	}
+	return *endpoint, nil
+}
+
+type federatedIdentityCredentialsGetOperationResponse struct {
+	HttpResponse *http.Response
+	Model        *FederatedIdentityCredentialPreviewPayload
+}
+
+type federatedIdentityCredentialsDeleteOperationResponse struct {
+	HttpResponse *http.Response
+}
+
+func (r FederatedIdentityCredentialResource) createOrUpdateFederatedIdentityCredential(ctx context.Context, c *managedidentities.ManagedIdentitiesClient, baseUri string, id managedidentities.FederatedIdentityCredentialId, payload FederatedIdentityCredentialPreviewPayload) (*http.Response, error) {
+	queryParameters := map[string]interface{}{
+		"api-version": federatedIdentityCredentialPreviewAPIVersion,
+	}
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsPut(),
+		autorest.WithBaseURL(baseUri),
+		autorest.WithPath(id.ID()),
+		autorest.WithJSON(payload),
+		autorest.WithQueryParameters(queryParameters),
+	)
+	req, err := preparer.Prepare((&http.Request{}).WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.Client.Send(req, azure.DoRetryWithRegistration(c.Client))
+	if err != nil {
+		return resp, err
+	}
+	return resp, autorest.Respond(resp, azure.WithErrorUnlessStatusCode(http.StatusCreated, http.StatusOK), autorest.ByClosing())
+}
+
+func (r FederatedIdentityCredentialResource) getFederatedIdentityCredential(ctx context.Context, c *managedidentities.ManagedIdentitiesClient, baseUri string, id managedidentities.FederatedIdentityCredentialId) (result federatedIdentityCredentialsGetOperationResponse, err error) {
+	queryParameters := map[string]interface{}{
+		"api-version": federatedIdentityCredentialPreviewAPIVersion,
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsGet(),
+		autorest.WithBaseURL(baseUri),
+		autorest.WithPath(id.ID()),
+		autorest.WithQueryParameters(queryParameters),
+	)
+	req, err := preparer.Prepare((&http.Request{}).WithContext(ctx))
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "managedidentity.FederatedIdentityCredentialResource", "getFederatedIdentityCredential", nil, "Failure preparing request")
+		return
+	}
+
+	result.HttpResponse, err = c.Client.Send(req, azure.DoRetryWithRegistration(c.Client))
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "managedidentity.FederatedIdentityCredentialResource", "getFederatedIdentityCredential", result.HttpResponse, "Failure sending request")
+		return
+	}
+
+	err = autorest.Respond(
+		result.HttpResponse,
+		azure.WithErrorUnlessStatusCode(http.StatusOK),
+		autorest.ByUnmarshallingJSON(&result.Model),
+		autorest.ByClosing(),
+	)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "managedidentity.FederatedIdentityCredentialResource", "getFederatedIdentityCredential", result.HttpResponse, "Failure responding to request")
+		return
+	}
+
+	return
+}
+
+func (r FederatedIdentityCredentialResource) deleteFederatedIdentityCredential(ctx context.Context, c *managedidentities.ManagedIdentitiesClient, baseUri string, id managedidentities.FederatedIdentityCredentialId) (result federatedIdentityCredentialsDeleteOperationResponse, err error) {
+	queryParameters := map[string]interface{}{
+		"api-version": federatedIdentityCredentialPreviewAPIVersion,
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsDelete(),
+		autorest.WithBaseURL(baseUri),
+		autorest.WithPath(id.ID()),
+		autorest.WithQueryParameters(queryParameters),
+	)
+	req, err := preparer.Prepare((&http.Request{}).WithContext(ctx))
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "managedidentity.FederatedIdentityCredentialResource", "deleteFederatedIdentityCredential", nil, "Failure preparing request")
+		return
+	}
+
+	result.HttpResponse, err = c.Client.Send(req, azure.DoRetryWithRegistration(c.Client))
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "managedidentity.FederatedIdentityCredentialResource", "deleteFederatedIdentityCredential", result.HttpResponse, "Failure sending request")
+		return
+	}
+
+	err = autorest.Respond(result.HttpResponse, azure.WithErrorUnlessStatusCode(http.StatusNoContent, http.StatusOK), autorest.ByClosing())
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "managedidentity.FederatedIdentityCredentialResource", "deleteFederatedIdentityCredential", result.HttpResponse, "Failure responding to request")
+		return
+	}
+
+	return
 }

@@ -34,6 +34,31 @@ resource "azurerm_federated_identity_credential" "example" {
 }
 ```
 
+## Example Usage (claims matching expression - preview API)
+
+```hcl
+resource "azurerm_resource_group" "example" {
+  name     = "example"
+  location = "West Europe"
+}
+
+resource "azurerm_user_assigned_identity" "example" {
+  location            = azurerm_resource_group.example.location
+  name                = "example"
+  resource_group_name = azurerm_resource_group.example.name
+}
+
+resource "azurerm_federated_identity_credential" "example" {
+  name                               = "example"
+  resource_group_name                = azurerm_resource_group.example.name
+  audience                           = ["api://AzureADTokenExchange"]
+  issuer                             = "https://oidc.prod-aks.azure.com/<tenant>/<issuer>"
+  parent_id                          = azurerm_user_assigned_identity.example.id
+  claims_matching_expression_value   = "claims['sub'] matches 'system:serviceaccount:example-*:*'"
+  claims_matching_expression_version = 1
+}
+```
+
 ## Arguments Reference
 
 The following arguments are supported:
@@ -48,7 +73,13 @@ The following arguments are supported:
 
 * `parent_id` - (Required) Specifies parent ID of User Assigned Identity for this Federated Identity Credential. Changing this forces a new Federated Identity Credential to be created.
 
-* `subject` - (Required) Specifies the subject for this Federated Identity Credential. Changing this forces a new Federated Identity Credential to be created.
+* `subject` - (Optional) Specifies the subject for this Federated Identity Credential. Changing this forces a new Federated Identity Credential to be created.
+
+* `claims_matching_expression_value` - (Optional) Specifies the claims matching expression value for this Federated Identity Credential. This uses the preview API behavior. Changing this forces a new Federated Identity Credential to be created.
+
+* `claims_matching_expression_version` - (Optional) Specifies the claims matching expression language version for this Federated Identity Credential. This uses the preview API behavior and must be provided together with `claims_matching_expression_value`. Changing this forces a new Federated Identity Credential to be created.
+
+~> **Note:** Exactly one of `subject` or `claims_matching_expression_value` must be specified.
 
 ## Attributes Reference
 
