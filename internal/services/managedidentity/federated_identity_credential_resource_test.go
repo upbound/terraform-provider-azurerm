@@ -48,6 +48,21 @@ func TestAccFederatedIdentityCredential_requiresImport(t *testing.T) {
 	})
 }
 
+func TestAccFederatedIdentityCredential_claimsMatchingExpression(t *testing.T) {
+	data := acceptance.BuildTestData(t, "azurerm_federated_identity_credential", "test")
+	r := FederatedIdentityCredentialTestResource{}
+
+	data.ResourceTest(t, r, []acceptance.TestStep{
+		{
+			Config: r.claimsMatchingExpression(data),
+			Check: acceptance.ComposeTestCheckFunc(
+				check.That(data.ResourceName).ExistsInAzure(r),
+			),
+		},
+		data.ImportStep(),
+	})
+}
+
 func (r FederatedIdentityCredentialTestResource) Exists(ctx context.Context, clients *clients.Client, state *pluginsdk.InstanceState) (*bool, error) {
 	id, err := managedidentities.ParseFederatedIdentityCredentialID(state.ID)
 	if err != nil {
@@ -87,6 +102,21 @@ resource "azurerm_federated_identity_credential" "import" {
   subject             = "foo"
 }
 `, r.basic(data))
+}
+
+func (r FederatedIdentityCredentialTestResource) claimsMatchingExpression(data acceptance.TestData) string {
+	return fmt.Sprintf(`
+%s
+resource "azurerm_federated_identity_credential" "test" {
+  audience                           = ["foo"]
+  issuer                             = "https://foo"
+  name                               = "acctest-${local.random_integer}"
+  resource_group_name                = azurerm_resource_group.test.name
+  parent_id                          = azurerm_user_assigned_identity.test.id
+  claims_matching_expression_value   = "claims['sub'] matches 'system:serviceaccount:test:*'"
+  claims_matching_expression_version = 1
+}
+`, r.template(data))
 }
 
 func (r FederatedIdentityCredentialTestResource) template(data acceptance.TestData) string {
