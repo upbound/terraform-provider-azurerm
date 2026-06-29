@@ -22,6 +22,7 @@ import (
 	storagecache_2024_07_01 "github.com/hashicorp/go-azure-sdk/resource-manager/storagecache/2024-07-01"
 	systemcentervirtualmachinemanager_2023_10_07 "github.com/hashicorp/go-azure-sdk/resource-manager/systemcentervirtualmachinemanager/2023-10-07"
 	workloads_v2024_09_01 "github.com/hashicorp/go-azure-sdk/resource-manager/workloads/2024-09-01"
+	sdkclient "github.com/hashicorp/go-azure-sdk/sdk/client"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/common"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/features"
 	aadb2c "github.com/hashicorp/terraform-provider-azurerm/internal/services/aadb2c/client"
@@ -286,6 +287,10 @@ type Client struct {
 	Vmware                            *vmware.Client
 	Web                               *web.Client
 	Workloads                         *workloads_v2024_09_01.Client
+
+	// armClients holds every client.BaseClient registered during Build.
+	// Populated once by Build(); read by AppendResponseMiddleware.
+	armClients []sdkclient.BaseClient
 }
 
 // NOTE: it should be possible for this method to become Private once the top level Client's removed
@@ -687,5 +692,14 @@ func (client *Client) Build(ctx context.Context, o *common.ClientOptions) error 
 		return fmt.Errorf("building clients for Workloads: %+v", err)
 	}
 
+	client.armClients = o.ConfiguredClients()
 	return nil
+}
+
+// AppendResponseMiddleware registers mw with every go-azure-sdk client
+// that was configured during provider initialisation.
+func (c *Client) AppendResponseMiddleware(mw sdkclient.ResponseMiddleware) {
+	for _, ac := range c.armClients {
+		ac.AppendResponseMiddleware(mw)
+	}
 }
