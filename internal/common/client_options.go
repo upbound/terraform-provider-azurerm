@@ -59,10 +59,14 @@ type ClientOptions struct {
 
 	// TODO: Remove when all go-autorest clients are gone
 	SkipProviderReg bool
+
+	// configuredClients accumulates every client.BaseClient passed to Configure.
+	// Read once by Client.Build() after all service clients are constructed.
+	configuredClients []client.BaseClient
 }
 
 // Configure set up a resourcemanager.Client using an auth.Authorizer from hashicorp/go-azure-sdk
-func (o ClientOptions) Configure(c client.BaseClient, authorizer auth.Authorizer) {
+func (o *ClientOptions) Configure(c client.BaseClient, authorizer auth.Authorizer) {
 	c.SetAuthorizer(authorizer)
 	c.SetUserAgent(userAgent(c.GetUserAgent(), o.TerraformVersion, o.PartnerId, o.DisableTerraformPartnerID))
 
@@ -76,6 +80,13 @@ func (o ClientOptions) Configure(c client.BaseClient, authorizer auth.Authorizer
 
 	c.AppendRequestMiddleware(requestLoggerMiddleware("AzureRM"))
 	c.AppendResponseMiddleware(responseLoggerMiddleware("AzureRM"))
+	o.configuredClients = append(o.configuredClients, c)
+}
+
+// ConfiguredClients returns all client.BaseClient instances passed to Configure.
+// Intended to be called once by Client.Build() after all service NewClient calls complete.
+func (o *ClientOptions) ConfiguredClients() []client.BaseClient {
+	return o.configuredClients
 }
 
 // ConfigureClient sets up an autorest.Client using an autorest.Authorizer
