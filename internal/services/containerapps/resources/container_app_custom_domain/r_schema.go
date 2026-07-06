@@ -30,7 +30,6 @@ func (a Resource) Arguments() map[string]*pluginsdk.Schema {
 		"container_app_environment_certificate_id": {
 			Type:         pluginsdk.TypeString,
 			Optional:     true,
-			ForceNew:     true,
 			RequiredWith: []string{"certificate_binding_type"},
 			ValidateFunc: managedenvironments.ValidateCertificateID,
 		},
@@ -38,7 +37,6 @@ func (a Resource) Arguments() map[string]*pluginsdk.Schema {
 		"certificate_binding_type": {
 			Type:         pluginsdk.TypeString,
 			Optional:     true,
-			ForceNew:     true,
 			ValidateFunc: validation.StringInSlice(containerapps.PossibleValuesForBindingType(), false),
 			Description:  "The Binding type. Possible values include `Disabled` and `SniEnabled`.",
 		},
