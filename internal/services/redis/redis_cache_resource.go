@@ -706,9 +706,22 @@ func resourceRedisCacheRead(d *pluginsdk.ResourceData, meta interface{}) error {
 		return fmt.Errorf("retrieving %s: %+v", *id, err)
 	}
 
-	keysResp, err := client.RedisListKeys(ctx, *id)
-	if err != nil {
-		return fmt.Errorf("listing keys for %s: %+v", *id, err)
+	// Access keys can only be listed when access-key authentication is
+	// enabled. When it is disabled (Entra-ID-only), RedisListKeys fails and
+	// the Read returns an error, which wedges the reconcile loop: the
+	// resource never settles, so every reconcile re-issues an Update. Read
+	// the toggle off the model and skip the call when it is disabled.
+	accessKeysAuthenticationEnabled := true
+	if resp.Model != nil && resp.Model.Properties.DisableAccessKeyAuthentication != nil {
+		accessKeysAuthenticationEnabled = !*resp.Model.Properties.DisableAccessKeyAuthentication
+	}
+
+	var keysResp redisresources.RedisListKeysOperationResponse
+	if accessKeysAuthenticationEnabled {
+		keysResp, err = client.RedisListKeys(ctx, *id)
+		if err != nil {
+			return fmt.Errorf("listing keys for %s: %+v", *id, err)
+		}
 	}
 
 	patchSchedulesRedisId := redispatchschedules.NewRediID(id.SubscriptionId, id.ResourceGroupName, id.RedisName)
@@ -786,10 +799,21 @@ func resourceRedisCacheRead(d *pluginsdk.ResourceData, meta interface{}) error {
 			return fmt.Errorf("setting `redis_configuration`: %+v", err)
 		}
 
-		d.Set("primary_connection_string", getRedisConnectionString(*props.HostName, *props.SslPort, *keysResp.Model.PrimaryKey, true))
-		d.Set("secondary_connection_string", getRedisConnectionString(*props.HostName, *props.SslPort, *keysResp.Model.SecondaryKey, true))
-		d.Set("primary_access_key", keysResp.Model.PrimaryKey)
-		d.Set("secondary_access_key", keysResp.Model.SecondaryKey)
+		if accessKeysAuthenticationEnabled && keysResp.Model != nil {
+			d.Set("primary_connection_string", getRedisConnectionString(*props.HostName, *props.SslPort, *keysResp.Model.PrimaryKey, true))
+			d.Set("secondary_connection_string", getRedisConnectionString(*props.HostName, *props.SslPort, *keysResp.Model.SecondaryKey, true))
+			d.Set("primary_access_key", keysResp.Model.PrimaryKey)
+			d.Set("secondary_access_key", keysResp.Model.SecondaryKey)
+		} else {
+			// Access-key auth is disabled, so the keys are not retrievable
+			// (Azure rejects listKeys). Clear any secrets that were carried
+			// over in state from when it was enabled (true -> false switch),
+			// rather than leaving stale values behind.
+			d.Set("primary_connection_string", "")
+			d.Set("secondary_connection_string", "")
+			d.Set("primary_access_key", "")
+			d.Set("secondary_access_key", "")
+		}
 		d.Set("access_keys_authentication_enabled", !pointer.From(props.DisableAccessKeyAuthentication))
 
 		if err := tags.FlattenAndSet(d, model.Tags); err != nil {
