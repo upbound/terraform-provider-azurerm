@@ -293,7 +293,8 @@ type Client struct {
 	Workloads                         *workloads_v2024_09_01.Client
 
 	// armClients holds every client.BaseClient registered during Build.
-	// Populated once by Build(); read by AppendResponseMiddleware.
+	// Populated once by Build(); read by AppendResponseMiddleware and
+	// AppendRequestMiddleware.
 	armClients []sdkclient.BaseClient
 }
 
@@ -709,5 +710,13 @@ func (client *Client) Build(ctx context.Context, o *common.ClientOptions) error 
 func (c *Client) AppendResponseMiddleware(mw sdkclient.ResponseMiddleware) {
 	for _, ac := range c.armClients {
 		ac.AppendResponseMiddleware(mw)
+	}
+}
+
+// AppendRequestMiddleware registers mw with every go-azure-sdk client
+// that was configured during provider initialisation.
+func (c *Client) AppendRequestMiddleware(mw sdkclient.RequestMiddleware) {
+	for _, ac := range c.armClients {
+		ac.AppendRequestMiddleware(mw)
 	}
 }

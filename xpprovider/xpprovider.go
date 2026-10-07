@@ -30,3 +30,15 @@ func RegisterResponseMiddleware(meta any, mw sdkclient.ResponseMiddleware) bool 
 	c.AppendResponseMiddleware(mw)
 	return true
 }
+
+// RegisterRequestMiddleware appends mw to every go-azure-sdk client held by
+// meta (the value returned by schema.Provider.Meta()). It returns false when
+// meta is not a *clients.Client.
+func RegisterRequestMiddleware(meta any, mw sdkclient.RequestMiddleware) bool {
+	c, ok := meta.(*clients.Client)
+	if !ok {
+		return false
+	}
+	c.AppendRequestMiddleware(mw)
+	return true
+}
